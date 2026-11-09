@@ -1,0 +1,50 @@
+name: Windows release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.22.2
+
+      - name: Build
+        # The colour engine loads match_scan_to_reference.py by path, so it ships as a file too.
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name ScanColorMatch
+          --add-data "match_scan_to_reference.py;."
+          scan_color_match.py
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "ScanColorMatch-${{ github.ref_name }}-windows-x64.zip"
+          Compress-Archive -Path dist/ScanColorMatch -DestinationPath $name
+          "ZIP_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScanColorMatch-windows-x64
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
