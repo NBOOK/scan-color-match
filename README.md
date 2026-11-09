@@ -88,7 +88,7 @@ A desktop tool that color-matches book and doujinshi scans to digital reference 
 ![scan2](docs/images/result-scan2.webp)
 ![scan3](docs/images/result-scan3.webp)
 
-下面这张扫图在项目里没有设置参考图，完全靠其他页面联合训练的共享 LUT 校色；中间的参考图只是为了对比而另外对齐的。
+下面这张扫图在项目里没有设置参考图，完全靠其他页面联合训练的共享 LUT 校色；中间的参考图只是为了对比而另外对齐的。联合训练的几张页面里几乎没有鲜艳的红色，共享 LUT 缺少这部分颜色的训练数据，所以手中苹果糖的颜色依然不太准确。
 
 ![scan4：共享 LUT](docs/images/result-scan4.webp)
 ![scan5：灰度页](docs/images/result-scan5.webp)
