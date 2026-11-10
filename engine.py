@@ -19,6 +19,7 @@ import multiprocessing
 import queue
 import shutil
 import struct
+import sys
 import threading
 import time
 import traceback
@@ -111,7 +112,8 @@ _CORRECTION_PROGRESS_QUEUE = None
 
 def _init_correction_worker(cancel, progress_queue):
     global _CORRECTION_CANCEL, _CORRECTION_MATCHER, _CORRECTION_PROGRESS_QUEUE
-    faulthandler.enable(all_threads=False)
+    if sys.stderr is not None:
+        faulthandler.enable(all_threads=False)
     _CORRECTION_CANCEL = cancel
     _CORRECTION_MATCHER = _matcher()
     _CORRECTION_PROGRESS_QUEUE = progress_queue
