@@ -3902,20 +3902,21 @@ class MainWindow(QMainWindow):
         if not self.project or not self._current_ref() or (self.task and self.task.isRunning()):
             return
         ref, scan = self._current_ref(), self._current_scan()
-        if not ref.get("exclude_mask") and not scan.get("exclude_mask"):
+        side = self._mask_side          # only the mask of the selected tab is cleared
+        if not (scan if side == "scan" else ref).get("exclude_mask"):
             return
         try:
             self.reference_view.cancel_current_action()
             self.result_view.cancel_current_action()
             undo, redo = self._exclusion_histories.setdefault(self._exclusion_key(), ([], []))
             cleared = False
-            if ref.get("exclude_mask"):
+            if side == "ref" and ref.get("exclude_mask"):
                 previous = ("ref", self._exclusion_snapshot(ref))
                 width, height = engine.validate_image(ref["path"])
                 if self.project.set_reference_exclusion(ref, np.zeros((height, width), np.uint8)):
                     undo.append(previous)
                     cleared = True
-            if scan.get("exclude_mask"):
+            if side == "scan" and scan.get("exclude_mask"):
                 previous = ("scan", self._exclusion_snapshot(scan))
                 width, height = engine.validate_image(scan["path"])
                 if self.project.set_scan_exclusion(scan, np.zeros((height, width), np.uint8)):
