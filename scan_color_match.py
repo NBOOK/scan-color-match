@@ -2582,6 +2582,7 @@ class MainWindow(QMainWindow):
         self._loader = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan-color-loader")
         self._loader_bridge = _MainThreadCall()
         self._loading = set()
+        self._mask_side = "ref"             # which mask the mode radios are about
         self._scan_view_driven = False      # sampling-mask editing is also on the scan view
         self._exclusion_driving = False
         self._keep_scan_tool = False
@@ -2983,6 +2984,18 @@ class MainWindow(QMainWindow):
             button.setToolTip(tip)
             self._exclusion_tool_buttons[mode] = button
         self._exclusion_tool_buttons["polygon"].setChecked(True)
+        # Both previews can be painted: this says which mask the mode above applies to
+        # (painting on a preview selects it too).
+        side_row = QHBoxLayout()
+        self._mask_side_buttons = {}
+        for key, title, tip in (("ref", "Reference", "The reference's sampling mask: paint on the right preview"),
+                                ("scan", "Scan", "The scan's own sampling mask: paint on the left preview")):
+            button = self._button(title, lambda _=False, key=key: self._set_mask_side(key), side_row)
+            button.setCheckable(True)
+            button.setToolTip(tip)
+            self._mask_side_buttons[key] = button
+        self._mask_side_buttons["ref"].setChecked(True)
+        exclusion_tools.addLayout(side_row)
         exclusion_tools.addLayout(tool_row)
         self.exclusion_diameter_row = QWidget()
         diameter_row = QHBoxLayout(self.exclusion_diameter_row)
@@ -3662,9 +3675,9 @@ class MainWindow(QMainWindow):
     def _sync_scan_view(self):
         """Let the scan preview carry its own sampling mask (titles, logos...).
 
-        Each side is painted on its own, with no alignment needed; a run combines them
-        so a pixel is used as evidence only where both masks allow it. The scan side
-        always marks what to leave out (red).
+        Each side is painted on its own, with no alignment needed, and has its own
+        exclude/include mode; a run combines them so a pixel is used as evidence only
+        where both masks allow it.
         """
         view = self.result_view
         scan = self._current_scan()
@@ -3673,7 +3686,9 @@ class MainWindow(QMainWindow):
         if active:
             view.live_stroke = None  # no layer preview for mask strokes
             try:
-                view.show_exclusion_overlay(self._scan_mask_preview(scan), (255, 100, 70))
+                scan_include = scan.get("mask_mode", "exclude") == "include"
+                view.show_exclusion_overlay(self._scan_mask_preview(scan),
+                                            (60, 200, 90) if scan_include else (255, 100, 70))
             except Exception as exc:
                 self.status.setText(str(exc) + "; Clear Mask to reset")
             if not self._scan_view_driven or view.mode != self._exclusion_mode:
@@ -3701,8 +3716,21 @@ class MainWindow(QMainWindow):
         self._edit_exclusion(points, "erase" if erase else "paint")
 
     def _current_mask_mode(self):
-        ref = self._current_ref()
-        return ref.get("mask_mode", "exclude") if ref else "exclude"
+        """The mode of the mask being edited: the scan's or the current reference's."""
+        owner = self._current_scan() if self._mask_side == "scan" else self._current_ref()
+        return owner.get("mask_mode", "exclude") if owner else "exclude"
+
+    def _set_mask_side(self, side):
+        """Choose which mask the mode radios (and Clear) are about: "ref" or "scan"."""
+        if side == self._mask_side:
+            return
+        self._mask_side = side
+        for key, button in self._mask_side_buttons.items():
+            blocked = button.blockSignals(True)
+            button.setChecked(key == side)
+            button.blockSignals(blocked)
+        self._update_mask_mode_ui()
+        self._refresh_exclusion_overlay()
 
     def _mask_mode_changed(self, include):
         if self._building:
@@ -3711,21 +3739,24 @@ class MainWindow(QMainWindow):
         if ref is None or (self.task and self.task.isRunning()):
             self._update_mask_mode_ui()
             return
+        owner = self._current_scan() if self._mask_side == "scan" else ref
         try:
-            changed = self.project.set_reference_mask_mode(ref, "include" if include else "exclude")
+            mode = "include" if include else "exclude"
+            changed = (self.project.set_scan_mask_mode(owner, mode) if self._mask_side == "scan"
+                       else self.project.set_reference_mask_mode(owner, mode))
         except Exception as exc:
             self._error(str(exc))
             self._update_mask_mode_ui()
             return
         if not changed:
             return
-        if ref.get("exclude_mask"):
+        if owner.get("exclude_mask"):
             self._after_exclusion_edit()
         else:
             self._update_reference_item(ref)
             self._refresh_exclusion_overlay()
-            self.status.setText("Use only painted: paint the matching part of the reference"
-                                if include else "Exclude painted: paint untrusted reference colors")
+            self.status.setText("Use only painted: paint the matching part"
+                                if include else "Exclude painted: paint what must not be used")
 
     def _update_mask_mode_ui(self):
         ref = self._current_ref()
@@ -3743,7 +3774,8 @@ class MainWindow(QMainWindow):
         for button in buttons:
             button.setEnabled(enabled)
             button.update()
-        self.reference_view.overlay_color = (60, 200, 90) if include else (255, 100, 70)
+        ref_include = bool(ref) and ref.get("mask_mode", "exclude") == "include"
+        self.reference_view.overlay_color = (60, 200, 90) if ref_include else (255, 100, 70)
 
     def _reference_mask_key(self, ref):
         return (str(self.project.directory), ref.get("exclude_mask"), ref.get("exclude_mask_digest"),
@@ -3789,7 +3821,7 @@ class MainWindow(QMainWindow):
             key = self._scan_mask_key(scan)
             mask = self._reference_masks.get(key)
             if mask is None:
-                mask = engine.load_scan_exclusion(self.project.directory, scan)
+                mask = engine.load_scan_mask(self.project.directory, scan)
                 mask.flags.writeable = False
                 self._reference_masks[key] = mask
                 while len(self._reference_masks) > 6:
@@ -3831,6 +3863,7 @@ class MainWindow(QMainWindow):
         ref, scan = self._current_ref(), self._current_scan()
         if ref is None or scan is None:
             return
+        self._set_mask_side(side)
         try:
             if side == "scan":
                 previous = ("scan", self._exclusion_snapshot(scan))

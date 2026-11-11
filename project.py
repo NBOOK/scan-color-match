@@ -204,7 +204,20 @@ class Project:
     def scan_exclusion_signature(self, scan: dict):
         if not scan.get("exclude_mask"):
             return None
-        return (scan["exclude_mask"], scan.get("exclude_mask_digest"))
+        return (scan["exclude_mask"], scan.get("exclude_mask_digest"), scan.get("mask_mode", "exclude"))
+
+    def set_scan_mask_mode(self, scan: dict, mode: str) -> bool:
+        """Switch whether painted scan pixels are excluded or the only ones used."""
+        if mode not in ("exclude", "include"):
+            raise ValueError(f"Unknown scan mask mode: {mode}")
+        if scan.get("mask_mode", "exclude") == mode:
+            return False
+        scan["mask_mode"] = mode
+        if scan.get("exclude_mask"):
+            self.invalidate()
+        else:
+            self.save()
+        return True
 
     def set_scan_exclusion(self, scan: dict, mask) -> bool:
         """Commit the painted binary mask in scan coordinates (white = not used).

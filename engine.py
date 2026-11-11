@@ -193,7 +193,19 @@ def load_reference_exclusion(directory: Path, ref: dict) -> np.ndarray | None:
 
 
 def load_scan_exclusion(directory: Path, scan: dict) -> np.ndarray | None:
-    """The scan-side mask in scan coordinates (white = not used as evidence), or None."""
+    """Effective scan-side exclusion in scan coordinates (white = not used as evidence).
+
+    Like the reference's: include mode inverts the painted mask, and an empty painted
+    mask never restricts sampling.
+    """
+    mask = load_scan_mask(directory, scan)
+    if mask is None or scan.get("mask_mode", "exclude") == "exclude":
+        return mask
+    return np.where(mask > 0, 0, 255).astype(np.uint8)
+
+
+def load_scan_mask(directory: Path, scan: dict) -> np.ndarray | None:
+    """Read and validate the painted scan-side asset (white = painted)."""
     if not scan.get("exclude_mask"):
         return None
     path = (Path(directory) / scan["exclude_mask"]).resolve()
