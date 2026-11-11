@@ -1335,6 +1335,7 @@ class ImageView(QGraphicsView):
         self._compare = False
         self.show_mask = False
         self.overlay_color = (255, 100, 70)
+        self.exclusion_overlay_active = False
         self.view_mask = False
         self._mask_preview = None
         self._brush_sample_image = None
@@ -1843,6 +1844,29 @@ class ImageView(QGraphicsView):
         self.show_mask = bool(paths)
         self._render_mask_preview()
         self._update_mask_visibility()
+
+    def show_exclusion_overlay(self, preview: np.ndarray, color):
+        """Show the reference sampling mask here (same coordinates as the other view)."""
+        self.exclusion_overlay_active = True
+        self._mask_key = None
+        self._mask_preview = preview.copy()
+        self._overlay_selected = True
+        self._overlay_other = None
+        self.overlay_color = color
+        self.show_mask = True
+        self._render_mask_preview()
+
+    def clear_exclusion_overlay(self):
+        """Drop the sampling mask; the caller shows the layer mask again."""
+        if not self.exclusion_overlay_active:
+            return
+        self.exclusion_overlay_active = False
+        self._mask_key = None
+        self._mask_preview = None
+        self._overlay_selected = False
+        self._overlay_other = None
+        self.overlay_color = (255, 100, 70)
+        self._render_mask_preview()
 
     def _render_mask_preview(self):
         mask = self._mask_preview
@@ -2558,6 +2582,9 @@ class MainWindow(QMainWindow):
         self._loader = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan-color-loader")
         self._loader_bridge = _MainThreadCall()
         self._loading = set()
+        self._scan_view_driven = False      # sampling-mask editing is also on the scan view
+        self._exclusion_driving = False
+        self._keep_scan_tool = False
         self._applying_lut = set()
         self._global_strength_timer = QTimer(self)
         self._global_strength_timer.setSingleShot(True)
@@ -2597,9 +2624,11 @@ class MainWindow(QMainWindow):
         if (event.type() == QEvent.Type.KeyPress and self.isActiveWindow()
                 and QApplication.activeModalWidget() is None):
             if self.edit_exclusions.isChecked():
-                if event.key() == Qt.Key.Key_Backspace and self.reference_view.mode == "polygon":
-                    self.reference_view.remove_polygon_point()
-                    return True
+                if event.key() == Qt.Key.Key_Backspace:
+                    for view in (self.reference_view, self.result_view):
+                        if view.mode == "polygon" and view.polygon_points:
+                            view.remove_polygon_point()
+                            return True
                 shortcuts = {Qt.Key.Key_B: "paint", Qt.Key.Key_E: "erase",
                              Qt.Key.Key_L: "polygon"}
                 if (event.modifiers() == Qt.KeyboardModifier.NoModifier
@@ -2838,7 +2867,8 @@ class MainWindow(QMainWindow):
         center_layout.addLayout(headings)
         views = QSplitter()
         self.result_view = ImageView()
-        self.result_view.live_stroke = LiveStrokePreview(self)
+        self._live_stroke = LiveStrokePreview(self)
+        self.result_view.live_stroke = self._live_stroke
         self.result_view.before_stroke = self._prepare_layer_for_stroke
         self.reference_view = ExclusionView()
         self.reference_view.stroke.connect(self._exclusion_stroke)
@@ -3586,6 +3616,8 @@ class MainWindow(QMainWindow):
             return
         self.exclusion_toolbar.setVisible(editing)
         self.reference_view.cancel_current_action()
+        if not editing:
+            self._sync_scan_view()
         if editing:
             self.result_view.cancel_current_action()
             self.show_exclusions.setChecked(True)
@@ -3618,10 +3650,48 @@ class MainWindow(QMainWindow):
         self.reference_view.set_mode(mode)
         self.exclusion_diameter.setEnabled(mode in {"paint", "erase"})
         self._exclusion_diameter_changed(self.exclusion_diameter.value())
+        self._sync_scan_view()
 
     def _exclusion_diameter_changed(self, value):
         self.reference_view.set_brush_radius(max(1, round(value / 2)))
         self.reference_view.set_brush_hardness(100)
+        if self._scan_view_driven:
+            self.result_view.set_brush_radius(max(1, round(value / 2)))
+            self.result_view.set_brush_hardness(100)
+
+    def _sync_scan_view(self):
+        """Let the scan preview edit the sampling mask too, once it is aligned.
+
+        An aligned reference is shown in scan coordinates, so a stroke on either view
+        is the same stroke. This is for content only the scan has (titles, logos).
+        """
+        view = self.result_view
+        active = self.edit_exclusions.isChecked() and self._reference_transform is not None
+        if active:
+            view.live_stroke = None  # no layer preview for mask strokes
+            preview = self.reference_view._mask_preview
+            if preview is not None:
+                view.show_exclusion_overlay(preview, self.reference_view.overlay_color)
+            if not self._scan_view_driven or view.mode != self._exclusion_mode:
+                self._exclusion_driving = True
+                try:
+                    view.cancel_current_action()
+                    view.set_mode(self._exclusion_mode)
+                finally:
+                    self._exclusion_driving = False
+            self._scan_view_driven = True
+            radius = max(1, round(self.exclusion_diameter.value() / 2))
+            view.set_brush_radius(radius)
+            view.set_brush_hardness(100)
+        elif self._scan_view_driven:
+            self._scan_view_driven = False
+            view.live_stroke = self._live_stroke
+            view.cancel_current_action()
+            view.clear_exclusion_overlay()
+            if not self._keep_scan_tool:
+                view.set_mode("pan")
+            self._keep_scan_tool = False
+            self._refresh_mask()
 
     def _exclusion_stroke(self, points, erase):
         self._edit_exclusion(points, "erase" if erase else "paint")
@@ -3787,6 +3857,10 @@ class MainWindow(QMainWindow):
             self._error(str(exc))
 
     def _refresh_exclusion_overlay(self, *_):
+        self._refresh_exclusion_overlay_inner()
+        self._sync_scan_view()
+
+    def _refresh_exclusion_overlay_inner(self):
         key = self._exclusion_key()
         if key != self._exclusion_view_key:
             self.reference_view.cancel_current_action()
@@ -4501,6 +4575,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_mask(self):
         layer, scan = self._current_layer(), self._current_scan()
+        if self.result_view.exclusion_overlay_active:
+            return  # the scan view shows the sampling mask while it is being edited
         selected_path = self.project.directory / layer["mask"] if layer and self.project else None
         if selected_path in self._resident_masks:
             self.result_view.set_mask_array(selected_path, self._resident_masks[selected_path],
@@ -4589,6 +4665,8 @@ class MainWindow(QMainWindow):
 
     def _prepare_layer_for_stroke(self):
         """Before painting on the global row (or nothing), create and select a layer."""
+        if self._scan_view_driven:
+            return True  # a sampling-mask stroke, not a layer
         if self._current_layer() is not None:
             return True
         if self.result_view.mode == "erase":
@@ -4758,6 +4836,10 @@ class MainWindow(QMainWindow):
             self.result_view.set_mode("erase")
 
     def _tool_mode_changed(self, mode: str):
+        if self._exclusion_driving:
+            return  # the sampling-mask tool set the scan view's mode
+        if mode != "pan" and self._scan_view_driven:
+            self._keep_scan_tool = True  # the user picked a layer tool: it stays selected
         if mode == "erase" and self._last_tool_mode != "erase":
             self._tool_before_erase = self._last_tool_mode
         self._last_tool_mode = mode
@@ -4812,6 +4894,10 @@ class MainWindow(QMainWindow):
         self.result_view.set_brush_hardness(hardness)
 
     def _brush_drag_changed(self, diameter: int, hardness: int):
+        if self._scan_view_driven:
+            if self.result_view.mode in {"paint", "erase"}:
+                self.exclusion_diameter.setValue(diameter)
+            return
         mode = self.result_view.mode
         if mode not in {"paint", "erase", "polygon"}:
             return
@@ -5320,6 +5406,9 @@ class MainWindow(QMainWindow):
         self._mask_save_error = None
 
     def _paint_stroke(self, points, erase):
+        if self._scan_view_driven:
+            self._exclusion_stroke(points, erase)
+            return
         scan, layer = self._current_scan(), self._layer_for_mask_edit()
         if scan is None or layer is None:
             return
@@ -5353,6 +5442,9 @@ class MainWindow(QMainWindow):
             self._error(str(exc))
 
     def _paint_polygon(self, vertices, radius, hardness):
+        if self._scan_view_driven:
+            self._edit_exclusion(vertices, "polygon")
+            return
         scan, layer = self._current_scan(), self._layer_for_mask_edit()
         if scan is None or layer is None:
             return
