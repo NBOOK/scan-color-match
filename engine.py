@@ -192,6 +192,31 @@ def load_reference_exclusion(directory: Path, ref: dict) -> np.ndarray | None:
     return np.where(mask > 0, 0, 255).astype(np.uint8)
 
 
+def load_scan_exclusion(directory: Path, scan: dict) -> np.ndarray | None:
+    """The scan-side mask in scan coordinates (white = not used as evidence), or None."""
+    if not scan.get("exclude_mask"):
+        return None
+    path = (Path(directory) / scan["exclude_mask"]).resolve()
+    if not path.is_relative_to(Path(directory).resolve()):
+        raise ValueError("Scan exclusion mask must be inside the project")
+    try:
+        contents = path.read_bytes()
+        if (scan.get("exclude_mask_digest") and
+                hashlib.sha256(contents).hexdigest() != scan["exclude_mask_digest"]):
+            raise ValueError("Scan exclusion mask content changed")
+        with Image.open(path) as source:
+            if source.format != "PNG" or source.mode not in {"L", "1"}:
+                raise ValueError("Scan exclusion mask must be a grayscale PNG")
+            mask = np.asarray(source.convert("L"), dtype=np.uint8).copy()
+        with Image.open(scan["path"]) as source:
+            expected = (source.height, source.width)
+        if mask.shape != expected:
+            raise ValueError("Scan exclusion mask size differs from the scan")
+        return mask
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid scan exclusion mask: {exc}") from exc
+
+
 def load_reference_mask(directory: Path, ref: dict) -> np.ndarray | None:
     """Read and validate the painted binary source asset; never silently allow bad evidence."""
     if not ref.get("exclude_mask"):
@@ -357,7 +382,7 @@ def alignment_signature(scan: dict, ref: dict) -> str:
 
 
 def _aligned_work(ms, scan_rgb, scan_alpha, ref_rgb, ref_alpha, homography,
-                  exclude_mask=None):
+                  exclude_mask=None, scan_exclude=None):
     height, width = scan_rgb.shape[:2]
     scale = min(0.32, 1700.0 / max(height, width))
     size = (max(1, round(width * scale)), max(1, round(height * scale)))
@@ -371,9 +396,12 @@ def _aligned_work(ms, scan_rgb, scan_alpha, ref_rgb, ref_alpha, homography,
     footprint = cv2.erode(footprint.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
     usable = cv2.warpPerspective(ref_alpha, transform, size, flags=cv2.INTER_NEAREST) > 0
     valid = footprint & usable & scan_valid
+    if scan_exclude is not None:
+        # Painted on the scan itself: any painted pixel keeps its reduced pixel excluded.
+        valid &= ~(cv2.resize(scan_exclude, size, interpolation=cv2.INTER_AREA) > 0)
     valid = _exclude_reference(valid, exclude_mask, transform)
     if np.count_nonzero(valid) < 10000:
-        if exclude_mask is not None:
+        if exclude_mask is not None or scan_exclude is not None:
             raise ValueError("Too few aligned pixels inside the reference sampling mask; "
                              "enlarge the included area or reduce the exclusions")
         raise ValueError("Too little aligned reference coverage")
@@ -381,7 +409,7 @@ def _aligned_work(ms, scan_rgb, scan_alpha, ref_rgb, ref_alpha, homography,
     limit = float(np.quantile(edge[valid], 0.68))
     candidate = valid & (edge <= limit)
     if np.count_nonzero(candidate) < 10000:
-        if exclude_mask is not None:
+        if exclude_mask is not None or scan_exclude is not None:
             raise ValueError("Too few reliable color samples inside the reference sampling mask; "
                              "enlarge the included area or reduce the exclusions")
         raise ValueError("Too few reliable flat-color samples")
@@ -1126,7 +1154,8 @@ def _align_scan(ms, scan, run_dir, cancel, previous=None, ref_done=None):
             if matches < 40 or inliers < 25 or ratio < .25:
                 raise ValueError(f"Weak alignment: {inliers}/{matches} inliers")
             work = _aligned_work(ms, scan_rgb, scan_alpha, ref_rgb, ref_alpha, homography,
-                                 load_reference_exclusion(run_dir.parents[2], ref))
+                                 load_reference_exclusion(run_dir.parents[2], ref),
+                                 load_scan_exclusion(run_dir.parents[2], scan))
             del ref_rgb, ref_alpha
             indexes = np.flatnonzero(work["candidate"])
             rng = np.random.default_rng(int(ref["id"][:8], 16))
@@ -1158,7 +1187,7 @@ def _align_scan(ms, scan, run_dir, cancel, previous=None, ref_done=None):
     del scan_rgb, scan_alpha
     group = None
     if successful:
-        guarded = any(ref.get("exclude_mask") for ref in successful)
+        guarded = any(ref.get("exclude_mask") for ref in successful) or bool(scan.get("exclude_mask"))
         plan = _sample_plan(ref_samples, int(scan["id"][:8], 16))
         _save_work(run_dir, scan["id"], works, [ref["id"] for ref in successful], plan, guarded)
         group = (works[0]["scan"].reshape(-1, 3)[plan[0]], plan[1], plan[2], guarded)

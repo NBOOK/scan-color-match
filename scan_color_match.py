@@ -3660,18 +3660,22 @@ class MainWindow(QMainWindow):
             self.result_view.set_brush_hardness(100)
 
     def _sync_scan_view(self):
-        """Let the scan preview edit the sampling mask too, once it is aligned.
+        """Let the scan preview carry its own sampling mask (titles, logos...).
 
-        An aligned reference is shown in scan coordinates, so a stroke on either view
-        is the same stroke. This is for content only the scan has (titles, logos).
+        Each side is painted on its own, with no alignment needed; a run combines them
+        so a pixel is used as evidence only where both masks allow it. The scan side
+        always marks what to leave out (red).
         """
         view = self.result_view
-        active = self.edit_exclusions.isChecked() and self._reference_transform is not None
+        scan = self._current_scan()
+        active = self.edit_exclusions.isChecked() and bool(scan and scan["path"]
+                                                           and Path(scan["path"]).exists())
         if active:
             view.live_stroke = None  # no layer preview for mask strokes
-            preview = self.reference_view._mask_preview
-            if preview is not None:
-                view.show_exclusion_overlay(preview, self.reference_view.overlay_color)
+            try:
+                view.show_exclusion_overlay(self._scan_mask_preview(scan), (255, 100, 70))
+            except Exception as exc:
+                self.status.setText(str(exc) + "; Clear Mask to reset")
             if not self._scan_view_driven or view.mode != self._exclusion_mode:
                 self._exclusion_driving = True
                 try:
@@ -3769,6 +3773,38 @@ class MainWindow(QMainWindow):
     def _exclusion_snapshot(ref):
         return {key: ref[key] for key in ("exclude_mask", "exclude_mask_digest") if key in ref}
 
+    def _scan_mask_key(self, scan):
+        return (str(self.project.directory), scan.get("exclude_mask"), scan.get("exclude_mask_digest"),
+                scan["path"])
+
+    def _remember_scan_mask(self, scan, mask):
+        if scan.get("exclude_mask"):
+            mask = np.array(mask, dtype=np.uint8, copy=True)
+            mask.flags.writeable = False
+            self._reference_masks[self._scan_mask_key(scan)] = mask
+
+    def _scan_mask(self, scan):
+        """The scan-side sampling mask (scan coordinates); all zero while nothing is painted."""
+        if scan.get("exclude_mask"):
+            key = self._scan_mask_key(scan)
+            mask = self._reference_masks.get(key)
+            if mask is None:
+                mask = engine.load_scan_exclusion(self.project.directory, scan)
+                mask.flags.writeable = False
+                self._reference_masks[key] = mask
+                while len(self._reference_masks) > 6:
+                    self._reference_masks.pop(next(iter(self._reference_masks)))
+            return mask
+        width, height = engine.validate_image(scan["path"])
+        return np.zeros((height, width), np.uint8)
+
+    def _scan_mask_preview(self, scan):
+        mask = self._scan_mask(scan)
+        scale = min(1.0, 1800 / max(mask.shape))
+        size = (max(1, round(mask.shape[1] * scale)), max(1, round(mask.shape[0] * scale)))
+        small = cv2.resize(mask, size, interpolation=cv2.INTER_AREA) if scale < 1.0 else mask
+        return np.where(small > 0, 255, 0).astype(np.uint8)
+
     def _after_exclusion_edit(self):
         scan = self._current_scan()
         scan["evaluation"] = None
@@ -3785,22 +3821,32 @@ class MainWindow(QMainWindow):
             self._update_scan_item(affected)
         self._refresh_color_metrics()
         self._update_edit_menu()
-        self.view_info.setText("Out of date · reference sampling mask changed · rerun needed")
-        self.status.setText("Reference sampling mask saved. Run Color Match to update the LUT and corrections")
+        self.view_info.setText("Out of date · sampling mask changed · rerun needed")
+        self.status.setText("Sampling mask saved. Run Color Match to update the LUT and corrections")
 
-    def _edit_exclusion(self, points, kind):
+    def _edit_exclusion(self, points, kind, side="ref", radius=None):
+        """Edit the reference's mask (``side="ref"``) or the scan's own (``side="scan"``)."""
         if not self.edit_exclusions.isChecked() or (self.task and self.task.isRunning()):
             return
-        ref = self._current_ref()
-        if ref is None:
+        ref, scan = self._current_ref(), self._current_scan()
+        if ref is None or scan is None:
             return
         try:
-            previous = self._exclusion_snapshot(ref)
-            mask = self._reference_mask(ref)
-            changed = engine.edit_reference_exclusion(mask, points, kind,
-                self.reference_view.brush_radius, self._reference_transform)
-            if self.project.set_reference_exclusion(ref, changed):
-                self._remember_reference_mask(ref, changed)
+            if side == "scan":
+                previous = ("scan", self._exclusion_snapshot(scan))
+                changed = engine.edit_reference_exclusion(self._scan_mask(scan), points, kind,
+                                                          radius or self.result_view.brush_radius, None)
+                saved = self.project.set_scan_exclusion(scan, changed)
+                if saved:
+                    self._remember_scan_mask(scan, changed)
+            else:
+                previous = ("ref", self._exclusion_snapshot(ref))
+                changed = engine.edit_reference_exclusion(self._reference_mask(ref), points, kind,
+                    radius or self.reference_view.brush_radius, self._reference_transform)
+                saved = self.project.set_reference_exclusion(ref, changed)
+                if saved:
+                    self._remember_reference_mask(ref, changed)
+            if saved:
                 undo, redo = self._exclusion_histories.setdefault(self._exclusion_key(), ([], []))
                 undo.append(previous)
                 redo.clear()
@@ -3815,16 +3861,27 @@ class MainWindow(QMainWindow):
     def _clear_exclusions(self):
         if not self.project or not self._current_ref() or (self.task and self.task.isRunning()):
             return
-        ref = self._current_ref()
-        if not ref.get("exclude_mask"):
+        ref, scan = self._current_ref(), self._current_scan()
+        if not ref.get("exclude_mask") and not scan.get("exclude_mask"):
             return
         try:
-            previous = self._exclusion_snapshot(ref)
-            width, height = engine.validate_image(ref["path"])
             self.reference_view.cancel_current_action()
-            if self.project.set_reference_exclusion(ref, np.zeros((height, width), np.uint8)):
-                undo, redo = self._exclusion_histories.setdefault(self._exclusion_key(), ([], []))
-                undo.append(previous)
+            self.result_view.cancel_current_action()
+            undo, redo = self._exclusion_histories.setdefault(self._exclusion_key(), ([], []))
+            cleared = False
+            if ref.get("exclude_mask"):
+                previous = ("ref", self._exclusion_snapshot(ref))
+                width, height = engine.validate_image(ref["path"])
+                if self.project.set_reference_exclusion(ref, np.zeros((height, width), np.uint8)):
+                    undo.append(previous)
+                    cleared = True
+            if scan.get("exclude_mask"):
+                previous = ("scan", self._exclusion_snapshot(scan))
+                width, height = engine.validate_image(scan["path"])
+                if self.project.set_scan_exclusion(scan, np.zeros((height, width), np.uint8)):
+                    undo.append(previous)
+                    cleared = True
+            if cleared:
                 redo.clear()
                 self._after_exclusion_edit()
             self._exclusion_tool_changed()
@@ -3838,17 +3895,24 @@ class MainWindow(QMainWindow):
         source, destination = (redo_stack, undo_stack) if redo else (undo_stack, redo_stack)
         if not source:
             return
-        ref = self._current_ref()
-        restored = dict(ref)
+        side, snapshot = source[-1]
+        owner = self._current_scan() if side == "scan" else self._current_ref()
+        restored = dict(owner)
         for key in ("exclude_mask", "exclude_mask_digest"):
             restored.pop(key, None)
-        restored.update(source[-1])
+        restored.update(snapshot)
         try:
-            mask = self._reference_mask(restored)
-            previous = self._exclusion_snapshot(ref)
+            previous = (side, self._exclusion_snapshot(owner))
             self.reference_view.cancel_current_action()
-            self.project.set_reference_exclusion(ref, mask)
-            self._remember_reference_mask(ref, mask)
+            self.result_view.cancel_current_action()
+            if side == "scan":
+                mask = self._scan_mask(restored)
+                self.project.set_scan_exclusion(owner, mask)
+                self._remember_scan_mask(owner, mask)
+            else:
+                mask = self._reference_mask(restored)
+                self.project.set_reference_exclusion(owner, mask)
+                self._remember_reference_mask(owner, mask)
             source.pop()
             destination.append(previous)
             self._after_exclusion_edit()
@@ -3868,7 +3932,9 @@ class MainWindow(QMainWindow):
         ref = self._current_ref()
         enabled = bool(ref and Path(ref["path"]).exists() and not (self.task and self.task.isRunning()))
         self.edit_exclusions.setEnabled(enabled)
-        self.clear_exclusions.setEnabled(enabled and bool(ref.get("exclude_mask")))
+        scan_now = self._current_scan()
+        self.clear_exclusions.setEnabled(enabled and bool(ref.get("exclude_mask")
+                                                           or (scan_now and scan_now.get("exclude_mask"))))
         self._update_mask_mode_ui()
         if not enabled and self.edit_exclusions.isChecked():
             self.edit_exclusions.setChecked(False)
@@ -5407,7 +5473,8 @@ class MainWindow(QMainWindow):
 
     def _paint_stroke(self, points, erase):
         if self._scan_view_driven:
-            self._exclusion_stroke(points, erase)
+            self._edit_exclusion(points, "erase" if erase else "paint", side="scan",
+                                 radius=self.result_view.brush_radius)
             return
         scan, layer = self._current_scan(), self._layer_for_mask_edit()
         if scan is None or layer is None:
@@ -5443,7 +5510,7 @@ class MainWindow(QMainWindow):
 
     def _paint_polygon(self, vertices, radius, hardness):
         if self._scan_view_driven:
-            self._edit_exclusion(vertices, "polygon")
+            self._edit_exclusion(vertices, "polygon", side="scan")
             return
         scan, layer = self._current_scan(), self._layer_for_mask_edit()
         if scan is None or layer is None:

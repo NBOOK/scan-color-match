@@ -247,7 +247,7 @@ ZH = {
     "missing": "丢失",
     "exclusions": "排除遮罩",
     "use only mask": "仅用遮罩",
-    "reference sampling mask changed": "参考取样遮罩已修改",
+    "sampling mask changed": "取样遮罩已修改",
     "Choose a reference or review the scan": "选择一张参考图，或检查扫图",
     "ΔE76: out of date": "ΔE76：已过期",
     "Selected layer ΔE76: use Refine All to measure its effect": "所选图层 ΔE76：请先“全部精修”再测量效果",
@@ -263,8 +263,8 @@ ZH = {
     "Scan replaced. Run Color Match to update the result": "扫图已替换。请运行校色以更新结果",
     "Reference replaced. Run Color Match to update the result": "参考图已替换。请运行校色以更新结果",
     "Updating saved local-layer settings...": "正在更新已保存的局部图层设置...",
-    "Reference sampling mask saved. Run Color Match to update the LUT and corrections":
-        "参考取样遮罩已保存。请运行校色以更新 LUT 和修正",
+    "Sampling mask saved. Run Color Match to update the LUT and corrections":
+        "取样遮罩已保存。请运行校色以更新 LUT 和修正",
     "Paint the reference colors to use only (green). Edits save automatically; rerun Color Match when done":
         "涂出只使用的参考颜色（绿色）。修改会自动保存；完成后重新运行校色",
     "Mark untrusted reference colors in red. Edits save automatically; rerun Color Match when done":

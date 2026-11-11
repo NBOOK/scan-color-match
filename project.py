@@ -201,6 +201,56 @@ class Project:
             raise
         return True
 
+    def scan_exclusion_signature(self, scan: dict):
+        if not scan.get("exclude_mask"):
+            return None
+        return (scan["exclude_mask"], scan.get("exclude_mask_digest"))
+
+    def set_scan_exclusion(self, scan: dict, mask) -> bool:
+        """Commit the painted binary mask in scan coordinates (white = not used).
+
+        The scan-side counterpart of the reference mask, for content only the scan
+        has (titles, logos). It is drawn without any alignment; a run combines it with
+        the reference's mask, so a pixel is used only where both allow it.
+        """
+        import numpy as np
+        from PIL import Image
+        with Image.open(scan["path"]) as image:
+            expected = (image.height, image.width)
+        mask = np.asarray(mask)
+        if mask.shape != expected:
+            raise ValueError("Scan exclusion mask size differs from the scan")
+        previous = {key: scan[key] for key in ("exclude_mask", "exclude_mask_digest") if key in scan}
+        replacement = {}
+        if np.any(mask):
+            buffer = io.BytesIO()
+            Image.fromarray(np.where(mask > 0, 255, 0).astype(np.uint8), "L").save(buffer, format="PNG")
+            contents = buffer.getvalue()
+            digest = hashlib.sha256(contents).hexdigest()
+            relative = f"assets/scan-masks/{scan['id']}-{digest}.png"
+            target = self.directory / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                temporary = target.with_suffix(".tmp")
+                temporary.write_bytes(contents)
+                os.replace(temporary, target)
+            replacement = {"exclude_mask": relative, "exclude_mask_digest": digest}
+        if replacement == previous:
+            return False
+        for key in ("exclude_mask", "exclude_mask_digest"):
+            scan.pop(key, None)
+        scan.update(replacement)
+        revision = self.data["calibration_revision"]
+        try:
+            self.invalidate()
+        except Exception:
+            for key in ("exclude_mask", "exclude_mask_digest"):
+                scan.pop(key, None)
+            scan.update(previous)
+            self.data["calibration_revision"] = revision
+            raise
+        return True
+
     def run_dir(self) -> Path | None:
         run = self.data.get("active_run")
         return self.directory / "cache" / "runs" / run["id"] if run else None
@@ -219,6 +269,7 @@ class Project:
             "id": scan["id"], "path": scan["path"], "mode": scan["mode"],
             **({"follow": scan.get("follow")} if scan["mode"] == "follow" else {}),
             "include_shared": scan.get("include_shared", False),
+            **({"exclude_mask": self.scan_exclusion_signature(scan)} if scan.get("exclude_mask") else {}),
             "refs": [{"id": ref["id"], "path": ref["path"],
                       "enabled": ref.get("enabled", True),
                       **({"exclude_mask": self.exclusion_signature(ref)}
