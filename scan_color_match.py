@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsPixmapItem,
     QGraphicsScene, QGraphicsView, QHBoxLayout,
     QGridLayout, QLineEdit, QListWidget, QMainWindow, QMenu,
-    QProgressBar, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
+    QProgressBar, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTabBar,
     QStyledItemDelegate, QStyle, QVBoxLayout, QWidget,
 )
 
@@ -2611,6 +2611,13 @@ class MainWindow(QMainWindow):
         if (event.type() == QEvent.Type.Leave and hasattr(self, "scan_list")
                 and watched is self.scan_list.viewport()):
             self._scan_hovered(None)
+        if (event.type() == QEvent.Type.MouseButtonPress and hasattr(self, "mask_side_tabs")
+                and self.edit_exclusions.isChecked()
+                and event.button() == Qt.MouseButton.LeftButton):
+            if watched is self.result_view.viewport():
+                self._set_mask_side("scan")
+            elif watched is self.reference_view.viewport():
+                self._set_mask_side("ref")
         if (event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape
                 and self.isVisible() and QApplication.activeModalWidget() is None):
             if self.edit_exclusions.isChecked():
@@ -2941,6 +2948,19 @@ class MainWindow(QMainWindow):
                               "evidence; saved in original reference coordinates. The LUT still "
                               "applies to the full scan.")
         controls.addWidget(mask_label)
+        # Which mask everything below is about: the scan's (left preview) or the
+        # reference's (right preview, the default). Painting on a preview selects its tab.
+        self.mask_side_tabs = QTabBar()
+        self.mask_side_tabs.setExpanding(True)
+        self.mask_side_tabs.setDrawBase(True)
+        self.mask_side_tabs.addTab(tr("Scan"))
+        self.mask_side_tabs.addTab(tr("Reference"))
+        self.mask_side_tabs.setTabToolTip(0, tr("The scan's own sampling mask: paint on the left preview"))
+        self.mask_side_tabs.setTabToolTip(1, tr("The reference's sampling mask: paint on the right preview"))
+        self.mask_side_tabs.setCurrentIndex(1)
+        self.mask_side_tabs.currentChanged.connect(
+            lambda index: self._set_mask_side("scan" if index == 0 else "ref"))
+        controls.addWidget(self.mask_side_tabs)
         self.mask_mode_exclude = QRadioButton("Exclusion")
         self.mask_mode_exclude.setToolTip("Painted pixels (red) are never used: watermarks, text, "
                                           "content that does not match the scan")
@@ -2984,18 +3004,6 @@ class MainWindow(QMainWindow):
             button.setToolTip(tip)
             self._exclusion_tool_buttons[mode] = button
         self._exclusion_tool_buttons["polygon"].setChecked(True)
-        # Both previews can be painted: this says which mask the mode above applies to
-        # (painting on a preview selects it too).
-        side_row = QHBoxLayout()
-        self._mask_side_buttons = {}
-        for key, title, tip in (("ref", "Reference", "The reference's sampling mask: paint on the right preview"),
-                                ("scan", "Scan", "The scan's own sampling mask: paint on the left preview")):
-            button = self._button(title, lambda _=False, key=key: self._set_mask_side(key), side_row)
-            button.setCheckable(True)
-            button.setToolTip(tip)
-            self._mask_side_buttons[key] = button
-        self._mask_side_buttons["ref"].setChecked(True)
-        exclusion_tools.addLayout(side_row)
         exclusion_tools.addLayout(tool_row)
         self.exclusion_diameter_row = QWidget()
         diameter_row = QHBoxLayout(self.exclusion_diameter_row)
@@ -3725,10 +3733,9 @@ class MainWindow(QMainWindow):
         if side == self._mask_side:
             return
         self._mask_side = side
-        for key, button in self._mask_side_buttons.items():
-            blocked = button.blockSignals(True)
-            button.setChecked(key == side)
-            button.blockSignals(blocked)
+        blocked = self.mask_side_tabs.blockSignals(True)
+        self.mask_side_tabs.setCurrentIndex(0 if side == "scan" else 1)
+        self.mask_side_tabs.blockSignals(blocked)
         self._update_mask_mode_ui()
         self._refresh_exclusion_overlay()
 
