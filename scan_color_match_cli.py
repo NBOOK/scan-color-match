@@ -97,6 +97,12 @@ def match_pair(args) -> None:
         copied_lut = str(target)
     print(json.dumps({"project": str(project.directory), "outputs": outputs,
                       "lut": copied_lut, "report": report}, ensure_ascii=False, indent=2))
+    if not outputs:
+        # The report above says why; scripts need a failing exit code as well.
+        errors = [state.get("error") for state in report.get("scans", {}).values() if state.get("error")]
+        print("Color matching produced no result: " + ("; ".join(errors) or "see the report above"),
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def parser() -> argparse.ArgumentParser:

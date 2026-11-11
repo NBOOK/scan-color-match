@@ -189,7 +189,7 @@ LUT 模式是每张扫图单独的设置，在右侧「LUT 模式」下拉框中
 
 ## 命令行
 
-给懒人用的AI自动化接口。处理单张扫图和单张参考图，使用与界面相同的引擎：
+给懒人用的AI自动化接口。处理单张扫图和单张参考图，使用与界面相同的引擎。Windows 打包版的文件夹里有一个单独的控制台程序 `ScanColorMatch-cli.exe`，用法一样（`ScanColorMatch.exe` 是窗口程序，不接受命令行参数）：进度和结果直接显示在终端里，终端会等它运行结束；成功时退出码为 0，没有生成任何结果时为 1，错误原因写在 stderr 里，方便脚本判断。从源码运行：
 
 ```powershell
 python scan_color_match_cli.py match --scan scan.png --reference reference.jpg --output-dir output --preview

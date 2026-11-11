@@ -24,15 +24,8 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller==6.22.2
 
       - name: Build
-        # The colour engine loads match_scan_to_reference.py by path, so it ships as a file too.
-        # The program's own modules sit next to the entry script; name them explicitly.
-        run: >
-          pyinstaller --noconfirm --clean --windowed --name ScanColorMatch
-          --paths .
-          --hidden-import engine --hidden-import i18n --hidden-import project
-          --hidden-import calibration_worker
-          --add-data "match_scan_to_reference.py;."
-          scan_color_match.py
+        # One folder with ScanColorMatch.exe (window) and ScanColorMatch-cli.exe (console).
+        run: pyinstaller --noconfirm --clean ScanColorMatch.spec
 
       - name: Package
         shell: pwsh
