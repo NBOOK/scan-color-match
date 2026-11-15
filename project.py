@@ -291,6 +291,7 @@ class Project:
         } for scan in self.data["scans"]]
         # How the global LUT is fitted changes every result.
         inputs = {"scans": inputs, "fit_metric": self.data.get("fit_metric", "de76"),
-                  "passes": self.data.get("passes", 2)}
+                  "passes": self.data.get("passes", 2),
+                  "ignore_validation": bool(self.data.get("ignore_validation"))}
         payload = json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()

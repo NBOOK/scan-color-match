@@ -2839,6 +2839,13 @@ class MainWindow(QMainWindow):
         passes_row.addWidget(self.passes_box)
         passes_row.addStretch(1)
         settings.addLayout(passes_row, 1, 1)
+        self.ignore_validation = QCheckBox("Ignore validation")
+        self.ignore_validation.setToolTip(
+            "Held-out validation checks that a LUT fitted without a page still improves that page.\n"
+            "When checked, a failure is only a warning: the LUT is used anyway. Results may be "
+            "worse on pages with different colors.")
+        self.ignore_validation.toggled.connect(self._fit_settings_changed)
+        settings.addWidget(self.ignore_validation, 2, 0, 1, 2)
         settings.setColumnStretch(1, 1)
         left_layout.addLayout(settings)
         left_layout.addWidget(_separator())
@@ -4161,6 +4168,8 @@ class MainWindow(QMainWindow):
         metric, passes = engine.fit_settings(self.project.data if self.project else {})
         (self.fit_de76 if metric == "de76" else self.fit_rgb).setChecked(True)
         self.passes_box.setValue(passes)
+        self.ignore_validation.setChecked(
+            bool(self.project and self.project.data.get("ignore_validation")))
         self.project_label.setText(self.project.directory.name if self.project else "No project")
         self.project_label.setToolTip(str(self.project.directory) if self.project else "")
         self.scan_list.clear()
@@ -5664,7 +5673,8 @@ class MainWindow(QMainWindow):
         self._set_progress_done(True)
 
     def _lock_left(self, locked):
-        for widget in (self.scan_list, self.fit_de76, self.fit_rgb, self.passes_box):
+        for widget in (self.scan_list, self.fit_de76, self.fit_rgb, self.passes_box,
+                       self.ignore_validation):
             widget.setEnabled(not locked)
 
     def _fit_settings_changed(self, *_):
@@ -5672,9 +5682,12 @@ class MainWindow(QMainWindow):
             return
         metric = "de76" if self.fit_de76.isChecked() else "rgb"
         passes = self.passes_box.value()
-        if engine.fit_settings(self.project.data) == (metric, passes):
+        ignore = self.ignore_validation.isChecked()
+        if (engine.fit_settings(self.project.data) == (metric, passes)
+                and bool(self.project.data.get("ignore_validation")) == ignore):
             return
         self.project.data["fit_metric"], self.project.data["passes"] = metric, passes
+        self.project.data["ignore_validation"] = ignore
         self.project.invalidate()
         self._refresh()
         self.status.setText("Fit settings changed. Run Color Match to apply them")

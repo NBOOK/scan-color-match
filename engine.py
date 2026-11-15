@@ -1000,10 +1000,11 @@ def load_chain(run_dir: Path, scan: dict) -> list[dict]:
     return chain
 
 
-def _fit_validated(ms, groups, metric, warnings=None):
+def _fit_validated(ms, groups, metric, warnings=None, ignore=False):
     """Fit the LUT that held-out validation accepts, trying the chosen target first.
 
-    Validation always measures ΔE76, whatever the LUT was fitted to.
+    Validation always measures ΔE76, whatever the LUT was fitted to. With ``ignore`` a
+    failed validation is only a warning: the chosen target's LUT is fitted anyway.
     """
     guarded = any(group[3] for group in groups)
     order = ("perceptual", "rgb") if metric == "de76" else ("rgb", "perceptual")
@@ -1023,6 +1024,13 @@ def _fit_validated(ms, groups, metric, warnings=None):
             mapping = (_fit_guarded_balanced(ms, groups, perceptual) if guarded else
                        _fit_balanced(ms, groups, perceptual))
             return mapping, validation, ("guarded " if guarded else "") + method
+    if ignore and last is not None:
+        perceptual = order[0] == "perceptual"
+        mapping = (_fit_guarded_balanced(ms, groups, perceptual) if guarded else
+                   _fit_balanced(ms, groups, perceptual))
+        if warnings is not None:
+            warnings.append("Validation failed but was ignored")
+        return mapping, last, ("guarded " if guarded else "") + order[0]
     return None, last, None
 
 
@@ -1041,7 +1049,7 @@ def _auto_strength(eval_values, eval_targets, passes):
 
 
 def _advance_passes(ms, scan, run_dir, target, metric, shared_mapping, cancel, warnings=None,
-                    pass_done=None):
+                    pass_done=None, ignore_validation=False):
     """Fit passes for one scan with references until ``target`` (or validation stops it).
 
     Pass k fits a LUT and a spatial field to the output of pass k - 1 at working
@@ -1067,7 +1075,8 @@ def _advance_passes(ms, scan, run_dir, target, metric, shared_mapping, cancel, w
         _check_cancel(cancel)
         group = (state.reshape(-1, 3)[plan[0]], plan[1], plan[2], guarded)
         if scan["mode"] == "own":
-            mapping, validation, method = _fit_validated(ms, [group], metric, warnings)
+            mapping, validation, method = _fit_validated(
+                ms, [group], metric, warnings, ignore=ignore_validation and number == 1)
             if mapping is None:
                 if number == 1:
                     return {"error": ("Restricted color sampling did not improve held-out regions"
@@ -1437,7 +1446,8 @@ def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, 
     shared = None
     if shared_groups:
         tracker.set(("align", all_scans[0]["id"]), 1, "Fitting the shared LUT")
-        shared, validation, method = _fit_validated(ms, shared_groups, metric, report["warnings"])
+        shared, validation, method = _fit_validated(ms, shared_groups, metric, report["warnings"],
+                                                    ignore=bool(data.get("ignore_validation")))
         shared_guarded = any(group[3] for group in shared_groups)
         report["shared"] = {"contributing_scans": len(shared_ids), "validation": validation,
                             "guarded_color_support": shared_guarded, "fitting_method": method}
@@ -1466,7 +1476,8 @@ def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, 
                         f"Fitted pass {number} of {Path(scan['path']).name}")
         mapping = None if scan["mode"] == "own" else shared
         return scan["id"], _advance_passes(ms, scan, run_dir, target, metric, mapping, cancel,
-                                           report["warnings"], pass_done)
+                                           report["warnings"], pass_done,
+                                           bool(data.get("ignore_validation")))
 
     fitted = [scan for scan in all_scans if scan["id"] in groups
               and (scan["mode"] == "own" or shared is not None)]
@@ -1575,7 +1586,7 @@ def extend_passes(project, scan: dict, target: int, cancel: threading.Event,
         progress(0, target, "Fitting more global passes...")
     return _advance_passes(_matcher(), scan, run, target, metric, None, cancel, [],
                            (lambda number: progress(number, target, f"Fitted pass {number}"))
-                           if progress else None)
+                           if progress else None, bool(project.data.get("ignore_validation")))
 
 
 def render_global(project, scan: dict, strength: int, cancel: threading.Event,
