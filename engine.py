@@ -1586,7 +1586,7 @@ def extend_passes(project, scan: dict, target: int, cancel: threading.Event,
         progress(0, target, "Fitting more global passes...")
     return _advance_passes(_matcher(), scan, run, target, metric, None, cancel, [],
                            (lambda number: progress(number, target, f"Fitted pass {number}"))
-                           if progress else None, bool(project.data.get("ignore_validation")))
+                           if progress else None)
 
 
 def render_global(project, scan: dict, strength: int, cancel: threading.Event,

@@ -2839,13 +2839,6 @@ class MainWindow(QMainWindow):
         passes_row.addWidget(self.passes_box)
         passes_row.addStretch(1)
         settings.addLayout(passes_row, 1, 1)
-        self.ignore_validation = QCheckBox("Ignore validation")
-        self.ignore_validation.setToolTip(
-            "Held-out validation checks that a LUT fitted without a page still improves that page.\n"
-            "When checked, a failure is only a warning: the LUT is used anyway. Results may be "
-            "worse on pages with different colors.")
-        self.ignore_validation.toggled.connect(self._fit_settings_changed)
-        settings.addWidget(self.ignore_validation, 2, 0, 1, 2)
         settings.setColumnStretch(1, 1)
         left_layout.addLayout(settings)
         left_layout.addWidget(_separator())
@@ -4168,8 +4161,6 @@ class MainWindow(QMainWindow):
         metric, passes = engine.fit_settings(self.project.data if self.project else {})
         (self.fit_de76 if metric == "de76" else self.fit_rgb).setChecked(True)
         self.passes_box.setValue(passes)
-        self.ignore_validation.setChecked(
-            bool(self.project and self.project.data.get("ignore_validation")))
         self.project_label.setText(self.project.directory.name if self.project else "No project")
         self.project_label.setToolTip(str(self.project.directory) if self.project else "")
         self.scan_list.clear()
@@ -5673,8 +5664,7 @@ class MainWindow(QMainWindow):
         self._set_progress_done(True)
 
     def _lock_left(self, locked):
-        for widget in (self.scan_list, self.fit_de76, self.fit_rgb, self.passes_box,
-                       self.ignore_validation):
+        for widget in (self.scan_list, self.fit_de76, self.fit_rgb, self.passes_box):
             widget.setEnabled(not locked)
 
     def _fit_settings_changed(self, *_):
@@ -5682,12 +5672,9 @@ class MainWindow(QMainWindow):
             return
         metric = "de76" if self.fit_de76.isChecked() else "rgb"
         passes = self.passes_box.value()
-        ignore = self.ignore_validation.isChecked()
-        if (engine.fit_settings(self.project.data) == (metric, passes)
-                and bool(self.project.data.get("ignore_validation")) == ignore):
+        if engine.fit_settings(self.project.data) == (metric, passes):
             return
         self.project.data["fit_metric"], self.project.data["passes"] = metric, passes
-        self.project.data["ignore_validation"] = ignore
         self.project.invalidate()
         self._refresh()
         self.status.setText("Fit settings changed. Run Color Match to apply them")
@@ -5739,7 +5726,7 @@ class MainWindow(QMainWindow):
             self.task.cancel_event.set()
             self.status.setText("Cancelling after the current step...")
 
-    def run_match(self):
+    def run_match(self, ignore_validation=False):
         if self.project is None:
             self._error("Create or open a project first")
             return
@@ -5749,14 +5736,32 @@ class MainWindow(QMainWindow):
             self._error(f"Could not save layer mask: {exc}")
             return
         snapshot = copy.deepcopy(self.project.data)
+        if ignore_validation:
+            snapshot["ignore_validation"] = True   # for this run only; never saved
         directory = self.project.directory
 
         def operation(cancel, progress):
             return run_calibration(snapshot, directory, cancel, progress)
 
-        self._start_task(operation, self._run_complete)
+        self._start_task(
+            operation, lambda result: self._run_complete(result, ignored=ignore_validation))
 
-    def _run_complete(self, result):
+    def _offer_ignore_validation(self, names):
+        """Held-out validation rejected some LUTs: let the user keep going anyway."""
+        if self.task and self.task.isRunning():
+            QTimer.singleShot(100, lambda: self._offer_ignore_validation(names))
+            return
+        shown = "\n".join(names[:12]) + ("\n..." if len(names) > 12 else "")
+        text = (tr("Held-out validation failed, so no result was made for:") + "\n\n" + shown
+                + "\n\n" + tr("The LUT may not suit pages with other colors. Ignore the "
+                                "validation and keep calculating?"))
+        if QMessageBox.question(
+                self, "Validation failed", text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.run_match(ignore_validation=True)
+
+    def _run_complete(self, result, ignored=False):
         record, report, updates = result
         if self.project.data["calibration_revision"] != record["revision"]:
             self._error("The project changed during processing. Run again")
@@ -5788,6 +5793,13 @@ class MainWindow(QMainWindow):
         self._refresh()
         ready = sum(row.get("status") == "ready" for row in report["scans"].values())
         self.status.setText(f"Color matching complete: {ready} scan(s) ready")
+        if not ignored:
+            rejected = [Path(scan["path"]).name for scan in self.project.data["scans"]
+                        if (row := report["scans"].get(scan["id"], {})).get("error")
+                        and ("own_validation" in row
+                             or str(row["error"]).startswith("Shared LUT failed"))]
+            if rejected:
+                QTimer.singleShot(0, lambda: self._offer_ignore_validation(rejected))
 
     def refine_selection(self):
         scan = self._current_scan()
