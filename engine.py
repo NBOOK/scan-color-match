@@ -1000,11 +1000,12 @@ def load_chain(run_dir: Path, scan: dict) -> list[dict]:
     return chain
 
 
-def _fit_validated(ms, groups, metric, warnings=None, ignore=False):
+def _fit_validated(ms, groups, metric, warnings=None, decide=None):
     """Fit the LUT that held-out validation accepts, trying the chosen target first.
 
-    Validation always measures ΔE76, whatever the LUT was fitted to. With ``ignore`` a
-    failed validation is only a warning: the chosen target's LUT is fitted anyway.
+    Validation always measures ΔE76, whatever the LUT was fitted to. When it fails,
+    ``decide(validation)`` (if given) asks the user: True fits the chosen target's LUT
+    anyway, with only a warning.
     """
     guarded = any(group[3] for group in groups)
     order = ("perceptual", "rgb") if metric == "de76" else ("rgb", "perceptual")
@@ -1024,7 +1025,7 @@ def _fit_validated(ms, groups, metric, warnings=None, ignore=False):
             mapping = (_fit_guarded_balanced(ms, groups, perceptual) if guarded else
                        _fit_balanced(ms, groups, perceptual))
             return mapping, validation, ("guarded " if guarded else "") + method
-    if ignore and last is not None:
+    if decide is not None and last is not None and decide(last):
         perceptual = order[0] == "perceptual"
         mapping = (_fit_guarded_balanced(ms, groups, perceptual) if guarded else
                    _fit_balanced(ms, groups, perceptual))
@@ -1049,7 +1050,7 @@ def _auto_strength(eval_values, eval_targets, passes):
 
 
 def _advance_passes(ms, scan, run_dir, target, metric, shared_mapping, cancel, warnings=None,
-                    pass_done=None, ignore_validation=False):
+                    pass_done=None, decide=None):
     """Fit passes for one scan with references until ``target`` (or validation stops it).
 
     Pass k fits a LUT and a spatial field to the output of pass k - 1 at working
@@ -1076,7 +1077,7 @@ def _advance_passes(ms, scan, run_dir, target, metric, shared_mapping, cancel, w
         group = (state.reshape(-1, 3)[plan[0]], plan[1], plan[2], guarded)
         if scan["mode"] == "own":
             mapping, validation, method = _fit_validated(
-                ms, [group], metric, warnings, ignore=ignore_validation and number == 1)
+                ms, [group], metric, warnings, decide=decide if number == 1 else None)
             if mapping is None:
                 if number == 1:
                     return {"error": ("Restricted color sampling did not improve held-out regions"
@@ -1361,12 +1362,38 @@ def _image_megapixels(path: str) -> float:
         return 10.0
 
 
-def run_project(data: dict, directory: Path, cancel: threading.Event, progress: Progress):
-    return _run_project_parallel(data, directory, cancel, progress)
+def run_project(data: dict, directory: Path, cancel: threading.Event, progress: Progress,
+                ask=None):
+    """Run the whole calibration.
+
+    ``ask(question) -> "yes" | "yes_all" | "no" | "no_all"`` is called in the middle of
+    a run when held-out validation rejects a LUT, so the user decides whether to fit it
+    anyway. Without it a rejected LUT is simply not used.
+    """
+    return _run_project_parallel(data, directory, cancel, progress, ask)
 
 
-def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, progress: Progress):
+def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, progress: Progress,
+                          ask=None):
     ms = _matcher()
+    ask_lock = threading.Lock()
+    remembered = {}
+
+    def decide_for(kind, names):
+        def decide(validation):
+            if ask is None:
+                return False
+            with ask_lock:                    # one question at a time, whichever thread asks
+                if kind in remembered:
+                    return remembered[kind]
+                answer = ask({"kind": kind, "scans": names,
+                              "median_raw": validation.get("median_raw") if validation else None,
+                              "median_corrected": validation.get("median_corrected") if validation else None})
+                if answer.endswith("_all"):
+                    remembered[kind] = answer.startswith("yes")
+                return answer.startswith("yes")
+        return decide
+
     metric, default_passes = fit_settings(data)
     run_id = uuid.uuid4().hex[:12]
     run_dir = directory / "cache" / "runs" / run_id
@@ -1446,8 +1473,10 @@ def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, 
     shared = None
     if shared_groups:
         tracker.set(("align", all_scans[0]["id"]), 1, "Fitting the shared LUT")
-        shared, validation, method = _fit_validated(ms, shared_groups, metric, report["warnings"],
-                                                    ignore=bool(data.get("ignore_validation")))
+        shared_names = [Path(scan["path"]).name for scan in all_scans if scan["mode"] == "shared"]
+        shared, validation, method = _fit_validated(
+            ms, shared_groups, metric, report["warnings"],
+            decide=decide_for("shared", shared_names or [Path(all_scans[0]["path"]).name]))
         shared_guarded = any(group[3] for group in shared_groups)
         report["shared"] = {"contributing_scans": len(shared_ids), "validation": validation,
                             "guarded_color_support": shared_guarded, "fitting_method": method}
@@ -1477,7 +1506,7 @@ def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, 
         mapping = None if scan["mode"] == "own" else shared
         return scan["id"], _advance_passes(ms, scan, run_dir, target, metric, mapping, cancel,
                                            report["warnings"], pass_done,
-                                           bool(data.get("ignore_validation")))
+                                           decide_for("own", [Path(scan["path"]).name]))
 
     fitted = [scan for scan in all_scans if scan["id"] in groups
               and (scan["mode"] == "own" or shared is not None)]

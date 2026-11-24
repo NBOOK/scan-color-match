@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import math
+import queue
 import shutil
 import sys
 import threading
@@ -2480,6 +2481,7 @@ class ExclusionView(ImageView):
 
 
 class TaskThread(QThread):
+    question = Signal(object, object)       # (what to ask, a queue.Queue for the answer)
     progress = Signal(int, int, str)
     completed = Signal(object)
     failed = Signal(str)
@@ -5628,6 +5630,7 @@ class MainWindow(QMainWindow):
         self.mask_mode_exclude.setEnabled(False)
         self.mask_mode_include.setEnabled(False)
         self.task = TaskThread(operation)
+        self.task.question.connect(self._answer_validation_question)
         self.task.progress.connect(self._progress)
         self.task.completed.connect(lambda _result: self._mark_progress_done())
         self.task.completed.connect(on_success)
@@ -5726,7 +5729,7 @@ class MainWindow(QMainWindow):
             self.task.cancel_event.set()
             self.status.setText("Cancelling after the current step...")
 
-    def run_match(self, ignore_validation=False):
+    def run_match(self):
         if self.project is None:
             self._error("Create or open a project first")
             return
@@ -5736,32 +5739,46 @@ class MainWindow(QMainWindow):
             self._error(f"Could not save layer mask: {exc}")
             return
         snapshot = copy.deepcopy(self.project.data)
-        if ignore_validation:
-            snapshot["ignore_validation"] = True   # for this run only; never saved
         directory = self.project.directory
 
+        def ask(question):
+            # Runs in the task thread; the dialog is shown by the window and the run waits.
+            answers = queue.Queue()
+            self.task.question.emit(question, answers)
+            while True:
+                try:
+                    return answers.get(timeout=.2)
+                except queue.Empty:
+                    if self.task.cancel_event.is_set():
+                        raise InterruptedError("Color matching was cancelled")
+
         def operation(cancel, progress):
-            return run_calibration(snapshot, directory, cancel, progress)
+            return run_calibration(snapshot, directory, cancel, progress, ask)
 
-        self._start_task(
-            operation, lambda result: self._run_complete(result, ignored=ignore_validation))
+        self._start_task(operation, self._run_complete)
 
-    def _offer_ignore_validation(self, names):
-        """Held-out validation rejected some LUTs: let the user keep going anyway."""
-        if self.task and self.task.isRunning():
-            QTimer.singleShot(100, lambda: self._offer_ignore_validation(names))
-            return
+    def _answer_validation_question(self, question, answers):
+        """A LUT failed held-out validation mid-run: the user decides whether to fit it anyway."""
+        names = question.get("scans") or []
         shown = "\n".join(names[:12]) + ("\n..." if len(names) > 12 else "")
-        text = (tr("Held-out validation failed, so no result was made for:") + "\n\n" + shown
-                + "\n\n" + tr("The LUT may not suit pages with other colors. Ignore the "
-                                "validation and keep calculating?"))
-        if QMessageBox.question(
-                self, "Validation failed", text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            self.run_match(ignore_validation=True)
+        before, after = question.get("median_raw"), question.get("median_corrected")
+        numbers = ("" if before is None or after is None else
+                   "\n" + tr("Median ΔE on held-out pages:") + f" {before:.2f} → {after:.2f}")
+        shared = question.get("kind") == "shared"
+        text = (tr("The shared LUT failed held-out validation.") if shared else
+                tr("The own LUT failed held-out validation.")) + numbers + "\n\n"
+        text += (tr("Scans that would use it:") if shared else tr("Scan:")) + "\n" + shown + "\n\n"
+        text += tr("It did not improve pages it was not fitted on, and may suit pages with other "
+                   "colors worse. Fit and use it anyway?")
+        Button = QMessageBox.StandardButton
+        buttons = Button.Yes | Button.No
+        if not shared:
+            buttons |= Button.YesToAll | Button.NoToAll
+        choice = QMessageBox.question(self, "Validation failed", text, buttons, Button.No)
+        answers.put({Button.Yes: "yes", Button.YesToAll: "yes_all",
+                     Button.NoToAll: "no_all"}.get(choice, "no"))
 
-    def _run_complete(self, result, ignored=False):
+    def _run_complete(self, result):
         record, report, updates = result
         if self.project.data["calibration_revision"] != record["revision"]:
             self._error("The project changed during processing. Run again")
@@ -5793,13 +5810,6 @@ class MainWindow(QMainWindow):
         self._refresh()
         ready = sum(row.get("status") == "ready" for row in report["scans"].values())
         self.status.setText(f"Color matching complete: {ready} scan(s) ready")
-        if not ignored:
-            rejected = [Path(scan["path"]).name for scan in self.project.data["scans"]
-                        if (row := report["scans"].get(scan["id"], {})).get("error")
-                        and ("own_validation" in row
-                             or str(row["error"]).startswith("Shared LUT failed"))]
-            if rejected:
-                QTimer.singleShot(0, lambda: self._offer_ignore_validation(rejected))
 
     def refine_selection(self):
         scan = self._current_scan()

@@ -17,8 +17,8 @@ except ImportError:
     from project import Project
 
 
-def _perform_calibration(snapshot, directory, cancel, progress):
-    record, report = engine.run_project(snapshot, Path(directory), cancel, progress)
+def _perform_calibration(snapshot, directory, cancel, progress, ask=None):
+    record, report = engine.run_project(snapshot, Path(directory), cancel, progress, ask)
     shadow = Project(Path(directory), copy.deepcopy(snapshot))
     shadow.data["active_run"] = record
     updates = {}
@@ -48,10 +48,21 @@ def _perform_calibration(snapshot, directory, cancel, progress):
     return record, report, updates
 
 
-def _calibrate_child(snapshot, directory, cancel, messages):
+def _calibrate_child(snapshot, directory, cancel, messages, replies):
+    def ask(question):
+        """Put a question to the user (through the parent) and wait for the answer."""
+        messages.put(("ask", question))
+        while True:
+            if cancel.is_set():
+                raise InterruptedError("Color matching was cancelled")
+            try:
+                return replies.get(timeout=.25)
+            except queue.Empty:
+                continue
+
     try:
         result = _perform_calibration(snapshot, directory, cancel,
-                                      lambda *values: messages.put(("progress", values)))
+                                      lambda *values: messages.put(("progress", values)), ask)
         messages.put(("completed", result))
     except InterruptedError:
         messages.put(("cancelled", None))
@@ -60,22 +71,26 @@ def _calibrate_child(snapshot, directory, cancel, messages):
         messages.put(("cancelled", None) if cancel.is_set() else ("failed", traceback.format_exc()))
 
 
-def run_calibration(snapshot: dict, directory: Path, cancel, progress):
-    """Return a completed run, or surface a child crash without killing the UI."""
+def run_calibration(snapshot: dict, directory: Path, cancel, progress, ask=None):
+    """Return a completed run, or surface a child crash without killing the UI.
+
+    ``ask(question)`` is answered by the caller while the run waits (see engine.run_project).
+    """
     messages = None
     try:
         context = multiprocessing.get_context("spawn")
         child_cancel = context.Event()
         messages = context.Queue()
+        replies = context.Queue()
         process = context.Process(target=_calibrate_child,
-                                  args=(snapshot, str(directory), child_cancel, messages),
+                                  args=(snapshot, str(directory), child_cancel, messages, replies),
                                   name="scan-color-calibration")
         process.start()
     except PermissionError:
         if messages is not None:
             messages.close()
         progress(0, 1, "Process isolation unavailable; continuing with memory-limited workers")
-        return _perform_calibration(snapshot, directory, cancel, progress)
+        return _perform_calibration(snapshot, directory, cancel, progress, ask)
     cancelled_at = None
     try:
         while True:
@@ -98,6 +113,8 @@ def run_calibration(snapshot: dict, directory: Path, cancel, progress):
                 raise RuntimeError("Calibration process disconnected; the previous result is unchanged") from exc
             if kind == "progress":
                 progress(*payload)
+            elif kind == "ask":
+                replies.put(ask(payload) if ask else "no")
             elif kind == "completed":
                 process.join(timeout=5)
                 if process.exitcode not in (None, 0):
@@ -117,3 +134,4 @@ def run_calibration(snapshot: dict, directory: Path, cancel, progress):
                 process.terminate()
                 process.join()
         messages.close()
+        replies.close()
