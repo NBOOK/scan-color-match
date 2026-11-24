@@ -390,6 +390,7 @@ PATTERNS = [
     (r"Refining (.+)", "正在精修 {0}"),
     (r"Choosing the strength of (.+)", "正在选择 {0} 的强度"),
     (r"Updated (.+)", "已更新 {0}"),
+    (r"The own LUT, pass (\d+), failed held-out validation\.", "独立 LUT 第 {0} 轮未通过留出验证。"),
     (r"Pass (\d+) failed held-out validation \(used only to blend towards\): at most (\d+)%", "第 {0} 轮未通过留出验证（仅用于插值）：最高 {1}%"),
     (r"pass (\d+) failed held-out validation and is used only to blend towards", "第 {0} 轮未通过留出验证，仅用于插值"),
     (r"Polygon edge feather (\d+) px", "多边形边缘羽化 {0} px"),

@@ -1077,7 +1077,8 @@ def _advance_passes(ms, scan, run_dir, target, metric, shared_mapping, cancel, w
         group = (state.reshape(-1, 3)[plan[0]], plan[1], plan[2], guarded)
         if scan["mode"] == "own":
             mapping, validation, method = _fit_validated(
-                ms, [group], metric, warnings, decide=decide if number == 1 else None)
+                ms, [group], metric, warnings, decide=(lambda validation, number=number: decide(validation, number))
+                if decide else None)
             if mapping is None:
                 if number == 1:
                     return {"error": ("Restricted color sampling did not improve held-out regions"
@@ -1380,13 +1381,13 @@ def _run_project_parallel(data: dict, directory: Path, cancel: threading.Event, 
     remembered = {}
 
     def decide_for(kind, names):
-        def decide(validation):
+        def decide(validation, number=1):
             if ask is None:
                 return False
             with ask_lock:                    # one question at a time, whichever thread asks
                 if kind in remembered:
                     return remembered[kind]
-                answer = ask({"kind": kind, "scans": names,
+                answer = ask({"kind": kind, "scans": names, "pass": number,
                               "median_raw": validation.get("median_raw") if validation else None,
                               "median_corrected": validation.get("median_corrected") if validation else None})
                 if answer.endswith("_all"):

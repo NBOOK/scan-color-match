@@ -5765,8 +5765,14 @@ class MainWindow(QMainWindow):
         numbers = ("" if before is None or after is None else
                    "\n" + tr("Median ΔE on held-out pages:") + f" {before:.2f} → {after:.2f}")
         shared = question.get("kind") == "shared"
-        text = (tr("The shared LUT failed held-out validation.") if shared else
-                tr("The own LUT failed held-out validation.")) + numbers + "\n\n"
+        number = question.get("pass") or 1
+        if shared:
+            title = tr("The shared LUT failed held-out validation.")
+        elif number > 1:
+            title = tr(f"The own LUT, pass {number}, failed held-out validation.")
+        else:
+            title = tr("The own LUT failed held-out validation.")
+        text = title + numbers + "\n\n"
         text += (tr("Scans that would use it:") if shared else tr("Scan:")) + "\n" + shown + "\n\n"
         text += tr("It did not improve pages it was not fitted on, and may suit pages with other "
                    "colors worse. Fit and use it anyway?")
